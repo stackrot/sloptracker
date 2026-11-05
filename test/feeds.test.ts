@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { matchCompanies } from "../worker/companies";
+import { COMPANIES, LISTED, matchCompanies } from "../worker/companies";
 import { canonicalUrl, FEEDS, parseFeed } from "../worker/feeds";
-import { feedsFor } from "../worker/sync";
+import { jobsFor } from "../worker/sync";
 
 const RSS = `<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -48,6 +48,14 @@ describe("feeds", () => {
 		}]);
 	});
 
+	test("skips items outside the time window", () => {
+		const at = Date.UTC(2026, 10, 4, 21, 10);
+
+		expect(parseFeed(RSS, "Example", at, at)).toHaveLength(1);
+		expect(parseFeed(RSS, "Example", at + 1)).toEqual([]);
+		expect(parseFeed(RSS, "Example", 0, at - 1)).toEqual([]);
+	});
+
 	test("parses Atom entries using the alternate link", () => {
 		const [story] = parseFeed(ATOM, "Example");
 
@@ -72,13 +80,38 @@ describe("feeds", () => {
 	});
 });
 
-describe("feed rotation", () => {
-	test("covers every feed once across four consecutive runs", () => {
-		const start = Date.UTC(2026, 10, 5, 11, 30);
-		const runs = [0, 1, 2, 3].map((i) => feedsFor(start + i * 600_000));
-		const seen = runs.flat().map((feed) => feed.url);
+describe("job rotation", () => {
+	const start = Date.UTC(2026, 10, 5, 11, 30);
+	const runs = (count: number) => Array.from({ length: count },
+		(_, i) => jobsFor(start + i * 120_000));
 
-		expect(runs.every((feeds) => feeds.length >= 3)).toBe(true);
-		expect(seen.sort()).toEqual(FEEDS.map((feed) => feed.url).sort());
+	test("fetches every feed once per cycle", () => {
+		const feeds = runs(FEEDS.length).map((job) => job.feed.url);
+
+		expect(feeds.sort()).toEqual(FEEDS.map((feed) => feed.url).sort());
+	});
+
+	test("reprices every company once per cycle", () => {
+		const symbols = runs(LISTED.length).map((job) => job.company.symbol);
+
+		expect(symbols.sort()).toEqual(LISTED.map((c) => c.symbol).sort());
+	});
+});
+
+describe("keywords", () => {
+	test("are unique and at most two words", () => {
+		const keywords = COMPANIES.flatMap((company) => company.keywords);
+
+		expect(new Set(keywords).size).toBe(keywords.length);
+		for (const keyword of keywords)
+			expect(keyword).toMatch(/^\w+( \w+)?$/);
+	});
+
+	test("match pairs only when separated by a single space", () => {
+		expect(matchCompanies("Jensen Huang speaks")).toEqual(["nvidia"]);
+		expect(matchCompanies("Mona Lisa. Su said")).toEqual([]);
+		expect(matchCompanies("SUPER MICRO shares")).toEqual(["supermicro"]);
+		expect(matchCompanies("Grok and grok")).toEqual(["spacex"]);
+		expect(matchCompanies("grok it")).toEqual([]);
 	});
 });

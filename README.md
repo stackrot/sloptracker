@@ -2,13 +2,13 @@
 
 Market caps, private valuations and news for the companies riding the AI boom. Live at <https://slop.stackrot.dev>.
 
-A Cloudflare Worker renders the page from a D1 database. A cron trigger runs every 10 minutes and refreshes every quote, but only a quarter of the news feeds, to keep each run's CPU time close to the Workers Free plan's 10 ms limit. Each feed is refreshed every 40 minutes.
+A Cloudflare Worker renders the page from a D1 database. The Workers Free plan allows 10 ms of CPU per invocation, so a cron trigger runs every 2 minutes and each run handles one company and one news feed. Each company is repriced about every 34 minutes and each feed is fetched every 26.
 
-Listed companies are priced with Finnhub's `/quote`. Share counts come from `/stock/profile2` and are refreshed daily, and market cap is price times shares. For ADRs, `adrRatio` converts the home-listing share count Finnhub reports into ADR-equivalent shares.
+Listed companies are priced with Finnhub's `/quote`. Share counts come from `/stock/profile2`, fetched alongside each quote, and market cap is price times shares. For ADRs, `adrRatio` converts the home-listing share count Finnhub reports into ADR-equivalent shares.
 
 Private companies show their last reported valuation, kept by hand in `worker/companies.ts` with a link to the report.
 
-News comes from the RSS feeds of BBC, The Guardian, Financial Times, Bloomberg, WSJ, CNBC, New York Times, Ars Technica, The Verge, TechCrunch, MIT Technology Review, Wired and 404 Media. Stories that don't mention a tracked company are dropped, and the rest are kept for 90 days.
+News comes from the RSS feeds of BBC, The Guardian, Financial Times, Bloomberg, WSJ, CNBC, New York Times, Ars Technica, The Verge, TechCrunch, MIT Technology Review, Wired and 404 Media. Stories that don't mention a tracked company are dropped, and the rest are kept for 90 days. Only items published in the last 6 hours are parsed, since earlier fetches stored the older ones.
 
 The combined market cap chart only plots days when every listed company has a value, so adding a company starts its history fresh.
 
@@ -32,11 +32,11 @@ curl localhost:8787/cdn-cgi/handler/scheduled   # run one sync
 bun run check                                   # types and tests
 ```
 
-Each sync fetches four share counts, so a fresh database needs a few runs before every company has a market cap.
+Each sync handles one company, so a fresh database needs 17 runs (about 34 minutes) before every company has a market cap.
 
 ## Changing companies
 
-Edit `worker/companies.ts`. `match` holds the patterns used to tag news stories. Use case-sensitive patterns for names that are also ordinary words (`Meta`, `Arm`, `Perplexity`).
+Edit `worker/companies.ts`. `keywords` holds the one- or two-word names used to tag news stories. A lower-case keyword matches in any case, and one with capitals matches exactly, for names that are also ordinary words (`Meta`, `Arm Holdings`, `Perplexity`).
 
 When a private company lists, move it to `LISTED` with its ticker. If Finnhub's profile reports the home listing rather than the ADR, set `adrRatio`.
 

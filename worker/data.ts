@@ -60,27 +60,18 @@ export async function board(env: Env): Promise<Board[]>
 }
 
 // Totals only count days on which every listed company has a value, so a
-// missed quote or a newly added company never shows up as a crash.
+// missed quote or a newly added company never shows up as a crash. D1 sums
+// the days, so the Worker reads at most one row per day.
 export async function history(env: Env): Promise<Point[]>
 {
+	const symbols = LISTED.map((company) => company.symbol);
 	const { results } = await env.DB.prepare(
-		`SELECT day, symbol, market_cap FROM history
-		WHERE day >= date('now', '-1 year') ORDER BY day`,
-	).all<{ day: string; symbol: string; market_cap: number }>();
-
-	const symbols = new Set(LISTED.map((company) => company.symbol));
-	const days = new Map<string, { total: number; count: number }>();
-	for (const row of results) {
-		if (!symbols.has(row.symbol))
-			continue;
-		const entry = days.get(row.day) ?? { total: 0, count: 0 };
-		entry.total += row.market_cap;
-		entry.count++;
-		days.set(row.day, entry);
-	}
-	return [...days]
-		.filter(([, entry]) => entry.count === symbols.size)
-		.map(([day, entry]) => ({ day, total: entry.total }));
+		`SELECT day, SUM(market_cap) AS total FROM history
+		WHERE day >= date('now', '-1 year')
+			AND symbol IN (SELECT value FROM json_each(?1))
+		GROUP BY day HAVING COUNT(*) = ?2 ORDER BY day`,
+	).bind(JSON.stringify(symbols), symbols.length).all<Point>();
+	return results;
 }
 
 export function isCompany(id: string | null): id is string

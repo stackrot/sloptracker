@@ -1,18 +1,18 @@
 import { LISTED, type Listed } from "./companies";
-import { FEEDS, parseFeed, type Feed, type Story } from "./feeds";
+import { FEEDS, parseFeed, type Feed } from "./feeds";
 
 const FINNHUB = "https://finnhub.io/api/v1";
 const USER_AGENT = "sloptracker (+https://slop.stackrot.dev)";
-const DAY = 24 * 60 * 60 * 1000;
-const NEWS_MAX_AGE = 90 * DAY;
-// Profiles cost one Finnhub call each, so refresh a few per run to keep
-// every run well inside the Worker subrequest limit.
-const PROFILES_PER_RUN = 4;
-// Each run fetches one group of feeds so parsing fits the Free plan's
-// 10 ms CPU limit per cron run. With the 10-minute cron, every feed is
-// refreshed every 40 minutes.
-const FEED_GROUPS = 4;
-const RUN_INTERVAL = 10 * 60 * 1000;
+const MINUTE = 60 * 1000;
+const NEWS_MAX_AGE = 90 * 24 * 60 * MINUTE;
+// The Workers Free plan allows 10 ms of CPU per cron run, so each run
+// handles one company and one feed and makes a single D1 call. With the
+// cron in wrangler.jsonc firing every 2 minutes, each company is repriced
+// about every 34 minutes and each feed is fetched every 26.
+const RUN_INTERVAL = 2 * MINUTE;
+// Parsing is the expensive part. A story older than this when its feed is
+// fetched was stored by an earlier fetch, so it is skipped unparsed.
+const NEWS_WINDOW = 6 * 60 * MINUTE;
 
 interface Quote {
 	c: number;
@@ -42,140 +42,105 @@ async function finnhub<T>(env: Env, path: string, symbol: string): Promise<T>
 	return response.json<T>();
 }
 
-async function staleShares(env: Env, now: number): Promise<Listed[]>
+export function jobsFor(time: number): { company: Listed; feed: Feed }
 {
-	const { results } = await env.DB
-		.prepare("SELECT symbol, shares_at FROM quotes")
-		.all<{ symbol: string; shares_at: number | null }>();
-	const fetched = new Map(results.map((row) => [row.symbol, row.shares_at]));
-	const age = (c: Listed) => fetched.get(c.symbol) ?? 0;
-	return LISTED
-		.filter((c) => now - age(c) > DAY)
-		.sort((a, b) => age(a) - age(b))
-		.slice(0, PROFILES_PER_RUN);
+	const slot = Math.floor(time / RUN_INTERVAL);
+	return {
+		company: LISTED[slot % LISTED.length],
+		feed: FEEDS[slot % FEEDS.length],
+	};
 }
 
-async function fetchShares(env: Env, company: Listed): Promise<number>
+async function shares(env: Env, company: Listed): Promise<number | null>
 {
-	const profile = await finnhub<Profile>(env, "stock/profile2",
-		company.symbol);
-	if (!profile.shareOutstanding)
-		throw new Error("no share count");
-	return profile.shareOutstanding * 1e6 / (company.adrRatio ?? 1);
-}
-
-async function syncShares(env: Env, now: number): Promise<void>
-{
-	const stale = await staleShares(env, now);
-	const results = await Promise.allSettled(
-		stale.map((company) => fetchShares(env, company)));
-
-	const rows = [];
-	for (const [i, result] of results.entries()) {
-		if (result.status === "fulfilled")
-			rows.push({ symbol: stale[i].symbol, shares: result.value });
-		else
-			console.error(`profile ${stale[i].symbol}: ${result.reason}`);
+	try {
+		const profile = await finnhub<Profile>(env, "stock/profile2",
+			company.symbol);
+		if (profile.shareOutstanding)
+			return profile.shareOutstanding * 1e6 / (company.adrRatio ?? 1);
+		console.error(`profile ${company.symbol}: no share count`);
+	} catch (error) {
+		console.error(`profile ${company.symbol}: ${error}`);
 	}
-	if (!rows.length)
-		return;
-
-	await env.DB.prepare(
-		`INSERT INTO quotes (symbol, shares, shares_at)
-		SELECT value ->> 'symbol', value ->> 'shares', ?1 FROM json_each(?2)
-		WHERE true
-		ON CONFLICT (symbol) DO UPDATE
-		SET shares = excluded.shares, shares_at = excluded.shares_at`,
-	).bind(now, JSON.stringify(rows)).run();
+	return null;
 }
 
-async function fetchQuotes(env: Env)
+// A failed profile keeps the stored share count, so only the quote has to
+// succeed for the company to be repriced.
+async function price(env: Env, company: Listed, now: number)
+	: Promise<D1PreparedStatement[]>
 {
-	const results = await Promise.allSettled(LISTED.map(
-		(company) => finnhub<Quote>(env, "quote", company.symbol)));
-
-	const rows = [];
-	for (const [i, result] of results.entries()) {
-		const { symbol } = LISTED[i];
-		if (result.status === "rejected")
-			console.error(`quote ${symbol}: ${result.reason}`);
-		else if (!result.value.c || !result.value.t)
-			console.error(`quote ${symbol}: empty`);
-		else
-			rows.push({
-				symbol,
-				price: result.value.c,
-				prev: result.value.pc,
-				at: result.value.t * 1000,
-			});
-	}
-	return rows;
-}
-
-export function feedsFor(time: number): Feed[]
-{
-	const group = Math.floor(time / RUN_INTERVAL) % FEED_GROUPS;
-	return FEEDS.filter((_, i) => i % FEED_GROUPS === group);
-}
-
-async function fetchNews(feeds: Feed[], now: number): Promise<Story[]>
-{
-	const results = await Promise.allSettled(feeds.map(async (feed) => {
-		const response = await get(feed.url);
-		return parseFeed(await response.text(), feed.source);
-	}));
-
-	const stories: Story[] = [];
-	for (const [i, result] of results.entries()) {
-		if (result.status === "rejected") {
-			console.error(`feed ${feeds[i].source}: ${result.reason}`);
-			continue;
-		}
-		// Feeds occasionally carry future-dated or long-dead items.
-		stories.push(...result.value.filter((story) =>
-			story.publishedAt < now + 3600_000 &&
-			now - story.publishedAt < NEWS_MAX_AGE));
-	}
-	return stories;
-}
-
-export async function sync(env: Env, scheduledTime: number): Promise<void>
-{
-	const now = Date.now();
-	// Share counts land first so a new symbol's first quote can be valued.
-	await syncShares(env, now);
-	const [quotes, stories] = await Promise.all([
-		fetchQuotes(env),
-		fetchNews(feedsFor(scheduledTime), now),
+	const [quote, count] = await Promise.all([
+		finnhub<Quote>(env, "quote", company.symbol),
+		shares(env, company),
 	]);
+	if (!quote.c || !quote.t)
+		throw new Error("empty quote");
 
-	const news = stories.map((story) => ({
-		...story,
-		companies: `,${story.companies.join(",")},`,
-	}));
-	await env.DB.batch([
+	return [
 		env.DB.prepare(
-			`INSERT INTO quotes (symbol, price, prev_close, quoted_at)
-			SELECT value ->> 'symbol', value ->> 'price', value ->> 'prev',
-				value ->> 'at'
-			FROM json_each(?1) WHERE true
+			`INSERT INTO quotes
+				(symbol, price, prev_close, quoted_at, shares, shares_at)
+			VALUES (?1, ?2, ?3, ?4, ?5, iif(?5 IS NULL, NULL, ?6))
 			ON CONFLICT (symbol) DO UPDATE SET price = excluded.price,
 				prev_close = excluded.prev_close,
-				quoted_at = excluded.quoted_at`,
-		).bind(JSON.stringify(quotes)),
+				quoted_at = excluded.quoted_at,
+				shares = coalesce(excluded.shares, shares),
+				shares_at = coalesce(excluded.shares_at, shares_at)`,
+		).bind(company.symbol, quote.c, quote.pc, quote.t * 1000, count, now),
 		env.DB.prepare(
 			`INSERT OR REPLACE INTO history (day, symbol, market_cap)
 			SELECT date(quoted_at / 1000, 'unixepoch'), symbol, price * shares
-			FROM quotes WHERE price IS NOT NULL AND shares IS NOT NULL`,
-		),
+			FROM quotes WHERE symbol = ?1 AND shares IS NOT NULL`,
+		).bind(company.symbol),
+	];
+}
+
+async function news(env: Env, feed: Feed, now: number)
+	: Promise<D1PreparedStatement[]>
+{
+	const response = await get(feed.url);
+	// The upper bound drops the occasional future-dated item.
+	const stories = parseFeed(await response.text(), feed.source,
+		now - NEWS_WINDOW, now + 60 * MINUTE);
+	if (!stories.length)
+		return [];
+
+	const rows = stories.map((story) => ({
+		...story,
+		companies: `,${story.companies.join(",")},`,
+	}));
+	return [
 		env.DB.prepare(
 			`INSERT OR IGNORE INTO news
 				(url, title, source, published_at, companies)
 			SELECT value ->> 'url', value ->> 'title', value ->> 'source',
 				value ->> 'publishedAt', value ->> 'companies'
 			FROM json_each(?1)`,
-		).bind(JSON.stringify(news)),
-		env.DB.prepare("DELETE FROM news WHERE published_at < ?1")
-			.bind(now - NEWS_MAX_AGE),
+		).bind(JSON.stringify(rows)),
+	];
+}
+
+export async function sync(env: Env, scheduledTime: number): Promise<void>
+{
+	const now = Date.now();
+	const { company, feed } = jobsFor(scheduledTime);
+	const [priced, fetched] = await Promise.allSettled([
+		price(env, company, now),
+		news(env, feed, now),
 	]);
+
+	const statements: D1PreparedStatement[] = [];
+	if (priced.status === "fulfilled")
+		statements.push(...priced.value);
+	else
+		console.error(`quote ${company.symbol}: ${priced.reason}`);
+	if (fetched.status === "fulfilled")
+		statements.push(...fetched.value);
+	else
+		console.error(`feed ${feed.source}: ${fetched.reason}`);
+
+	statements.push(env.DB.prepare("DELETE FROM news WHERE published_at < ?1")
+		.bind(now - NEWS_MAX_AGE));
+	await env.DB.batch(statements);
 }
