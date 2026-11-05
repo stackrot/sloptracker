@@ -42,14 +42,12 @@ When a private company lists, move it to `LISTED` with its ticker. If Finnhub's 
 
 ## Deploy
 
-Pushing to `main` runs `.github/workflows/deploy.yml`, which checks the Worker and deploys with `wrangler deploy`.
+Pushing to `main` runs `.github/workflows/deploy.yml`, which checks the Worker, applies any new D1 migrations from `migrations/` and deploys with `wrangler deploy`.
 
 | Secret | Where | Purpose |
 |---|---|---|
-| `CLOUDFLARE_API_TOKEN` | GitHub Actions | Workers Scripts:Edit and Workers Routes:Edit on the `stackrot.dev` zone |
+| `CLOUDFLARE_API_TOKEN` | GitHub Actions | `sloptracker-ci` account token: Workers Scripts and D1 write, plus Workers Routes write and Zone read on `stackrot.dev` |
 | `FINNHUB_API_KEY` | Worker (`wrangler secret put`) | Finnhub free-tier key |
-
-Schema changes go in `migrations/` and are applied with `bun run migrate`. That needs D1 access, which the CI token doesn't have, so run it locally before pushing code that depends on the change.
 
 `styles.css` and `site.js` are served as immutable. Their `?v=` references in `worker/render.ts` and `public/404.html` must match the first 8 hex digits of the file's SHA-256, and `bun test` fails with the expected value when they don't.
 
