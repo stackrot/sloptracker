@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { matchCompanies } from "../worker/companies";
-import { canonicalUrl, parseFeed } from "../worker/feeds";
+import { canonicalUrl, FEEDS, parseFeed } from "../worker/feeds";
+import { feedsFor } from "../worker/sync";
 
 const RSS = `<?xml version="1.0"?>
 <rss version="2.0"><channel>
@@ -68,5 +69,16 @@ describe("feeds", () => {
 		expect(matchCompanies("robot arm picks up a cup")).toEqual([]);
 		expect(matchCompanies("AWS outage hits Amazon sellers"))
 			.toEqual(["amazon"]);
+	});
+});
+
+describe("feed rotation", () => {
+	test("covers every feed once across four consecutive runs", () => {
+		const start = Date.UTC(2026, 10, 5, 11, 30);
+		const runs = [0, 1, 2, 3].map((i) => feedsFor(start + i * 600_000));
+		const seen = runs.flat().map((feed) => feed.url);
+
+		expect(runs.every((feeds) => feeds.length >= 3)).toBe(true);
+		expect(seen.sort()).toEqual(FEEDS.map((feed) => feed.url).sort());
 	});
 });

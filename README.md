@@ -2,7 +2,7 @@
 
 Market caps, private valuations and news for the companies riding the AI boom. Live at <https://slop.stackrot.dev>.
 
-A Cloudflare Worker renders the page from a D1 database, and a cron trigger refreshes the data every 10 minutes.
+A Cloudflare Worker renders the page from a D1 database. A cron trigger runs every 10 minutes and refreshes every quote, but only a quarter of the news feeds, to keep each run's CPU time close to the Workers Free plan's 10 ms limit. Each feed is refreshed every 40 minutes.
 
 Listed companies are priced with Finnhub's `/quote`. Share counts come from `/stock/profile2` and are refreshed daily, and market cap is price times shares. For ADRs, `adrRatio` converts the home-listing share count Finnhub reports into ADR-equivalent shares.
 

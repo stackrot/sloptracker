@@ -168,7 +168,7 @@ export default {
 		return route(request, env);
 	},
 
-	async scheduled(_controller, env, ctx): Promise<void> {
-		ctx.waitUntil(sync(env));
+	async scheduled(controller, env, ctx): Promise<void> {
+		ctx.waitUntil(sync(env, controller.scheduledTime));
 	},
 } satisfies ExportedHandler<Env>;

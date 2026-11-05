@@ -1,5 +1,5 @@
 import { LISTED, type Listed } from "./companies";
-import { FEEDS, parseFeed, type Story } from "./feeds";
+import { FEEDS, parseFeed, type Feed, type Story } from "./feeds";
 
 const FINNHUB = "https://finnhub.io/api/v1";
 const USER_AGENT = "sloptracker (+https://slop.stackrot.dev)";
@@ -8,6 +8,11 @@ const NEWS_MAX_AGE = 90 * DAY;
 // Profiles cost one Finnhub call each, so refresh a few per run to keep
 // every run well inside the Worker subrequest limit.
 const PROFILES_PER_RUN = 4;
+// Each run fetches one group of feeds so parsing fits the Free plan's
+// 10 ms CPU limit per cron run. With the 10-minute cron, every feed is
+// refreshed every 40 minutes.
+const FEED_GROUPS = 4;
+const RUN_INTERVAL = 10 * 60 * 1000;
 
 interface Quote {
 	c: number;
@@ -107,9 +112,15 @@ async function fetchQuotes(env: Env)
 	return rows;
 }
 
-async function fetchNews(now: number): Promise<Story[]>
+export function feedsFor(time: number): Feed[]
 {
-	const results = await Promise.allSettled(FEEDS.map(async (feed) => {
+	const group = Math.floor(time / RUN_INTERVAL) % FEED_GROUPS;
+	return FEEDS.filter((_, i) => i % FEED_GROUPS === group);
+}
+
+async function fetchNews(feeds: Feed[], now: number): Promise<Story[]>
+{
+	const results = await Promise.allSettled(feeds.map(async (feed) => {
 		const response = await get(feed.url);
 		return parseFeed(await response.text(), feed.source);
 	}));
@@ -117,7 +128,7 @@ async function fetchNews(now: number): Promise<Story[]>
 	const stories: Story[] = [];
 	for (const [i, result] of results.entries()) {
 		if (result.status === "rejected") {
-			console.error(`feed ${FEEDS[i].source}: ${result.reason}`);
+			console.error(`feed ${feeds[i].source}: ${result.reason}`);
 			continue;
 		}
 		// Feeds occasionally carry future-dated or long-dead items.
@@ -128,14 +139,14 @@ async function fetchNews(now: number): Promise<Story[]>
 	return stories;
 }
 
-export async function sync(env: Env): Promise<void>
+export async function sync(env: Env, scheduledTime: number): Promise<void>
 {
 	const now = Date.now();
 	// Share counts land first so a new symbol's first quote can be valued.
 	await syncShares(env, now);
 	const [quotes, stories] = await Promise.all([
 		fetchQuotes(env),
-		fetchNews(now),
+		fetchNews(feedsFor(scheduledTime), now),
 	]);
 
 	const news = stories.map((story) => ({
