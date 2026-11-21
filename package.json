@@ -11,8 +11,8 @@
 		"deploy": "bun run check && wrangler deploy"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.4",
+		"@types/bun": "^1.4.5",
 		"typescript": "7.0.2",
-		"wrangler": "4.158.0"
+		"wrangler": "4.166.0"
 	}
 }
