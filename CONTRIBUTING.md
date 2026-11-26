@@ -69,8 +69,9 @@ bun run check                                   # wrangler types, tsc, bun test
 ```
 
 `deploy.yml` runs `bun install --frozen-lockfile` and `bun run check` on
-every push to `main`, then applies the D1 migrations and deploys. Pull
-requests don't run them, so run `bun run check` before you open one.
+every push to `main`, then applies the D1 migrations and deploys. `ci.yml`
+runs the same two steps on every pull request, without migrating or
+deploying.
 
 ## Security issues
 
